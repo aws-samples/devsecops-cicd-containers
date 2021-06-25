@@ -1,0 +1,1147 @@
+  AWSTemplateFormatVersion: "2010-09-09"
+  Parameters:
+    BranchName:
+      Description: CodeCommit branch name
+      Type: String
+      Default: master
+    RepositoryName:
+      Description: CodeComit repository name
+      Type: String
+      Default: eksrepo
+    DASTTool:
+      Description: Select the DAST tool from the list
+      Type: String
+      AllowedValues: [OWASP-Zap]
+    OwaspZapURLName:
+      Description: OWASP Zap DAST Tool URL
+      Type: String
+      Default: http://18.221.16.46:81/
+    ApplicationURLForDASTScan:
+      Description: Application URL to run the DAST/Pen testing 
+      Type: String
+      Default: https://eksstg.smanepalli.com
+    OwaspZapApiKey:
+      Description: OWASP Zap ApiKey
+      Type: String
+      NoEcho: true
+      Default: zapapikey
+    SnykApiKey:
+      Description: Snyk ApiKey
+      Type: String
+      NoEcho: true
+    LambdaPackageLoc:
+      Description: S3 loc of lambda package
+      Type: String
+      Default: manepals-artifacts-eks
+    LambdaPackageS3Key:
+      Description: S3 Key for Lambda package object
+      Type: String
+      Default: import_findings_security_hub.zip
+    LambdaHandlerName:
+      Description: Name of the lambda handler
+      Type: String
+      Default: import_findings_security_hub.lambda_handler
+    SASTTool:
+      Description: Select the SAST tool from the list
+      Type: String
+      AllowedValues: [Anchore, Snyk]
+    PipelineNotificationsEmail:
+      Description: Email address to receive SNS notifications for pipelineChanges
+      Type: String
+      Default: manepals@amazon.com
+    PipelineApproverEmail:
+      Description: Email address to send approval notifications
+      Type: String
+      Default: manepals@amazon.com
+    EksClusterName:
+      Type: String
+      Description: The name of the EKS cluster created
+      Default: prod-eks
+      MinLength: 1
+      MaxLength: 100
+      ConstraintDescription: You must enter the EKS cluster name
+    EcrRepositoryName:
+      Description: CodeComit repository name
+      Type: String
+      Default: eks-container-repo
+    EksProdClusterName:
+      Type: String
+      Description: The name of the EKS cluster created
+      Default: eks-prod-1
+      MinLength: 1
+      MaxLength: 100
+      ConstraintDescription: You must enter the EKS cluster name
+
+  #### Parameter Groups, Labels
+  Metadata:
+    'AWS::CloudFormation::Interface':
+      ParameterGroups:
+      - Label:
+          default: Code
+        Parameters:
+        - BranchName
+        - RepositoryName 
+        - EcrRepositoryName
+        - EksClusterName
+        - EksProdClusterName
+      - Label:
+          default: SAST
+        Parameters:
+        - SASTTool
+        - SnykApiKey
+      - Label:
+          default: DAST
+        Parameters:
+        - DASTTool
+        - OwaspZapURLName
+        - OwaspZapApiKey
+        - ApplicationURLForDASTScan
+      - Label:
+          default: Lambda function 
+        Parameters:
+        - LambdaPackageLoc
+        - LambdaPackageS3Key
+        - LambdaHandlerName
+      - Label:
+          default: General
+        Parameters:
+        - PipelineNotificationsEmail
+        - PipelineApproverEmail
+
+    ParameterLabels:
+      BranchName:
+          default: CodeCommit branch
+      RepositoryName:
+          default: CodeCommit repository
+      SASTTool:
+          default: Select SAST tool
+      SnykApiKey:
+          default: If Snyk is selected as SAST tool, provide Snyk API token
+      DASTTool:
+          default: Select DAST tool
+      OwaspZapURLName:
+          default: OWASP Zap URL name
+      OwaspZapApiKey:
+          default: OWASP ZAP API authentication token
+      ApplicationURLForDASTScan:
+          default: Application web URL
+      LambdaPackageLoc:
+          default: S3 bucket name of lambda code
+      LambdaPackageS3Key:
+          default: S3 bucket folder of lambda code
+      LambdaHandlerName:
+          default: Lambda function handler name
+      PipelineNotificationsEmail:
+          default: Email for pipeline notifications
+      PipelineApproverEmai:
+          default: Email for approval notifications
+      EksClusterName:
+          default: EKS cluster name
+      EcrRepositoryName:
+          default: ECR repository name
+      EksProdClusterName:
+          default: PROD EKS cluster name
+      
+  ######################
+  Conditions:
+    ScanWith_Anchore: !Equals [ !Ref SASTTool, "Anchore" ]
+    ScanWith_Snyk: !Equals [ !Ref SASTTool, "Snyk" ]
+
+  Resources:
+    SSMParameterForSnykApiKey:
+      Type: 'AWS::SSM::Parameter'
+      Condition: ScanWith_Snyk
+      Properties:
+        Name: !Sub ${AWS::StackName}-Snyk-ApiKey
+        Type: StringList 
+        Value: !Ref SnykApiKey
+
+    SSMParameterForZapApiKey:
+      Type: 'AWS::SSM::Parameter'
+      Properties:
+        Name: !Sub ${AWS::StackName}-Zap-ApiKey
+        Type: StringList 
+        Value: !Ref OwaspZapApiKey
+
+    SSMParameterOwaspZapURL:
+      Type: 'AWS::SSM::Parameter'
+      Properties:
+        Name: !Sub ${AWS::StackName}-Owasp-Zap-URL
+        Type: StringList 
+        Value: !Ref OwaspZapURLName
+
+    SSMParameterAppURL:
+      Type: 'AWS::SSM::Parameter'
+      Properties:
+        Name: !Sub ${AWS::StackName}-Application-URL
+        Type: StringList 
+        Value: !Ref ApplicationURLForDASTScan
+
+    CloudWatchLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties: 
+        LogGroupName: !Sub ${AWS::StackName}-pipeline-logs
+        RetentionInDays: 7
+        #KmsKeyId: !Ref PipelineKMSKey
+
+    PipelineKMSKey:
+      Type: AWS::KMS::Key
+      Properties: 
+        Description: KMS key for pipeline
+        Enabled: true
+        EnableKeyRotation: true
+        KeyPolicy: 
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws-us-gov:iam::${AWS::AccountId}:root'
+            Action: 
+              - 'kms:Create*'
+              - 'kms:Describe*'
+              - 'kms:Enable*'
+              - 'kms:List*'
+              - 'kms:Put*'
+              - 'kms:Update*'
+              - 'kms:Revoke*'
+              - 'kms:Disable*'
+              - 'kms:Get*'
+              - 'kms:Delete*'
+              - 'kms:ScheduleKeyDeletion'
+              - 'kms:CancelKeyDeletion' 
+            Resource: '*'
+          - Effect: Allow
+            Principal:
+              Service: 
+                - codepipeline.amazonaws.com
+                - !Sub logs.${AWS::Region}.amazonaws.com
+                - codebuild.amazonaws.com
+            Action:
+            - 'kms:Encrypt'
+            - 'kms:Decrypt'
+            - 'kms:ReEncrypt*'
+            - 'kms:GenerateDataKey*'
+            - 'kms:CreateGrant'
+            - 'kms:ListGrants'
+            - 'kms:DescribeKey'
+            Resource: '*'
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !GetAtt PipelineServiceRole.Arn
+                - !GetAtt StaticCodeAnalysisServiceRole.Arn
+            Action:
+            - 'kms:Encrypt'
+            - 'kms:Decrypt'
+            - 'kms:ReEncrypt*'
+            - 'kms:GenerateDataKey*'
+            - 'kms:CreateGrant'
+            - 'kms:ListGrants'
+            - 'kms:DescribeKey'
+            Resource: '*'
+        Tags:
+          - Key: pipeline-name
+            Value: !Sub ${AWS::StackName}-pipeline
+
+    ApprovalTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        DisplayName: PipelineApproval
+        Subscription: 
+        - Endpoint: !Ref PipelineApproverEmail
+          Protocol: "email"
+        TopicName: !Sub  codestar-notifications-approval-${AWS::StackName}
+        Tags:
+          - Key: pipeline-name
+            Value: !Sub ${AWS::StackName}-pipeline   
+
+    PipelineTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        DisplayName: PipelineStageChangeNotification
+        Subscription: 
+        - Endpoint: !Ref PipelineNotificationsEmail
+          Protocol: "email"
+        TopicName: !Sub  codestar-notifications-pipelinechange-${AWS::StackName}
+        Tags:
+          - Key: pipeline-name
+            Value: !Sub ${AWS::StackName}-pipeline 
+
+    CloudTrailTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        DisplayName: CloudTrailNotification
+        Subscription: 
+        - Endpoint: !Ref PipelineNotificationsEmail
+          Protocol: "email"
+        TopicName: !Sub  ${AWS::StackName}-cloudtrail-notifications-topic
+        Tags:
+          - Key: pipeline-name
+            Value: !Sub ${AWS::StackName}-pipeline     
+        
+    LambdaFunSecurityHubImport:
+      Type: 'AWS::Lambda::Function'
+      Properties:
+          FunctionName: ImpToSecurityHubEKS
+          Handler: !Ref LambdaHandlerName
+          Role: !GetAtt LambdaExecutionRole.Arn
+          Runtime: python3.8
+          Code:
+            S3Bucket: !Ref LambdaPackageLoc
+            S3Key: !Ref LambdaPackageS3Key
+          Timeout: 10
+          Tags:
+            - Key: pipeline-name
+              Value: !Sub ${AWS::StackName}-pipeline       
+        
+
+    # creating a bucket for storing artifacts, with server side encryption enabled.
+    CodePipelineArtifactStoreBucket:
+      Type: 'AWS::S3::Bucket'
+      Properties:
+        BucketName: !Sub ${AWS::StackName}-artifact-bucket
+        Tags:
+          - Key: pipeline-name
+            Value: !Sub ${AWS::StackName}-pipeline
+
+    # S3bucket poilicy is attached to resource(S3 bucket) "CodePipelineArtifactStoreBucket"
+    # To deny if object server side encryption is not enabled with header
+    # To deny all actions if transport security (SSL/TLS) is not enabled (i.e, aws:SecureTransport: false)
+    CodePipelineArtifactStoreBucketPolicy:
+      Type: 'AWS::S3::BucketPolicy'
+      Properties:
+        Bucket: !Ref CodePipelineArtifactStoreBucket
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Sid: DenyUnEncryptedObjectUploads
+              Effect: Deny
+              Principal: '*'
+              Action: 's3:PutObject'
+              Resource: !Join 
+                - ''
+                - - !GetAtt 
+                    - CodePipelineArtifactStoreBucket
+                    - Arn
+                  - /*
+              Condition:
+                StringNotEquals:
+                  's3:x-amz-server-side-encryption': 'aws:kms'
+            - Sid: DenyInsecureConnections
+              Effect: Deny
+              Principal: '*'
+              Action: 's3:*'
+              Resource: !Join 
+                - ''
+                - - !GetAtt 
+                    - CodePipelineArtifactStoreBucket
+                    - Arn
+                  - /*
+              Condition:
+                Bool:
+                  'aws:SecureTransport': false
+
+    ###Cloud watch event role 
+    AmazonCloudWatchEventRole:
+      Type: 'AWS::IAM::Role'
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - events.amazonaws.com
+              Action: 'sts:AssumeRole'
+        Path: /
+        Policies:
+          - PolicyName: cwe-pipeline-execution
+            PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Effect: Allow
+                  Action: 'codepipeline:StartPipelineExecution'
+                  Resource: !Join 
+                    - ''
+                    - - 'arn:aws-us-gov:codepipeline:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':'
+                      - !Ref AppPipeline
+
+    ### Cloudwatch event to trigger the pipeline on commit
+    AmazonCloudWatchEventRule:
+      Type: 'AWS::Events::Rule'
+      Properties:
+        EventPattern:
+          source:
+            - aws.codecommit
+          detail-type:
+            - CodeCommit Repository State Change
+          resources:
+            - !Join 
+              - ''
+              - - 'arn:aws-us-gov:codecommit:'
+                - !Ref 'AWS::Region'
+                - ':'
+                - !Ref 'AWS::AccountId'
+                - ':'
+                - !Ref RepositoryName
+          detail:
+            event:
+              - referenceCreated
+              - referenceUpdated
+            referenceType:
+              - branch
+            referenceName:
+              - master
+        Targets:
+          - Arn: !Join 
+              - ''
+              - - 'arn:aws-us-gov:codepipeline:'
+                - !Ref 'AWS::Region'
+                - ':'
+                - !Ref 'AWS::AccountId'
+                - ':'
+                - !Ref AppPipeline
+            RoleArn: !GetAtt 
+              - AmazonCloudWatchEventRole
+              - Arn
+            Id: codepipeline-AppPipeline     
+        
+    ###Cloudwatch event rule for SNS notifications for pipeline state change
+    CloudWatchPipelineEventRule:
+      Type: 'AWS::Events::Rule'
+      Properties:
+        EventPattern:
+          source:
+            - aws.codepipeline
+          detail-type:
+            - CodePipeline Stage Execution State Change
+        Targets:
+          - Arn: !Ref PipelineTopic
+            Id: "PipelineNotifications"
+
+    ###Cloudtrail event notifications for pipeline updates, deletes, and codebuild project creation, deletion, etc.
+    TrailBucket: 
+      Type: AWS::S3::Bucket
+      Properties: 
+        Tags:
+            - Key: pipeline-name
+              Value: !Sub ${AWS::StackName}-pipeline
+
+    TrailBucketPolicy:
+      Type: 'AWS::S3::BucketPolicy'
+      Properties:
+        Bucket: !Ref TrailBucket
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: 'cloudtrail.amazonaws.com'
+            Action: 's3:GetBucketAcl'
+            Resource: !Sub 'arn:aws-us-gov:s3:::${TrailBucket}'
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: 'cloudtrail.amazonaws.com'
+            Action: 's3:PutObject'
+            Resource: !Sub 'arn:aws-us-gov:s3:::${TrailBucket}/AWSLogs/${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': 'bucket-owner-full-control'
+          - Sid: AllowSSLRequestsOnly # AWS Foundational Security Best Practices v1.0.0 S3.5
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource: !Join 
+              - ''
+              - - !GetAtt 
+                  - TrailBucket
+                  - Arn
+                - /*
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+
+    Trail: 
+      DependsOn: 
+        - TrailBucketPolicy
+      Type: AWS::CloudTrail::Trail
+      Properties: 
+        S3BucketName: 
+          Ref: TrailBucket
+        IncludeGlobalServiceEvents: true
+        IsLogging: true
+        IsMultiRegionTrail: true
+        EnableLogFileValidation: true
+        CloudWatchLogsLogGroupArn: !GetAtt 'TrailLogGroup.Arn'
+        CloudWatchLogsRoleArn: !GetAtt 'TrailLogGroupRole.Arn'
+
+    TrailLogGroup:
+      Type: 'AWS::Logs::LogGroup'
+      Properties:
+        RetentionInDays: 90
+
+    TrailLogGroupRole:
+      Type: 'AWS::IAM::Role'
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: AssumeRole1
+            Effect: Allow
+            Principal:
+              Service: 'cloudtrail.amazonaws.com'
+            Action: 'sts:AssumeRole'
+        Policies:
+        - PolicyName: 'cloudtrail-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+              Resource: !GetAtt 'TrailLogGroup.Arn'
+
+    PipelineStateChangeMetricFiletr:
+      Type: 'AWS::Logs::MetricFilter'
+      Properties:
+          FilterPattern: '{ ($.eventName = "StartPipelineExecution") || ($.eventName = "StopPipelineExecution") || ($.eventName = "UpdatePipeline") || ($.eventName = "DeletePipeline") }'
+          LogGroupName: !Ref TrailLogGroup
+          MetricTransformations:
+              - MetricName: "pipelineEvent"
+                MetricNamespace: "CloudTrailMetrics"
+                MetricValue: "1"
+
+    PipelineStateChangeAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: !Sub ${AWS::StackName}-CloudTrailPipelineEventChange
+        AlarmDescription: "Alarm when cloudtrail receives an state change event from codepipeline"
+        MetricName: "pipelineEvent"
+        AlarmActions: 
+          - !Ref CloudTrailTopic
+        ComparisonOperator: "GreaterThanThreshold"
+        EvaluationPeriods: 1
+        Threshold: 0
+        Namespace: "CloudTrailMetrics"
+        Statistic: "Sum"
+        Period: 1800
+
+    CodeBuildChangeMetricFilter:
+      Type: 'AWS::Logs::MetricFilter'
+      Properties:
+          FilterPattern: '{ (($.eventSource = "codebuild.amazonaws.com") && (($.eventName = "CreateProject") || ($.eventName = "DeleteProject"))) }'
+          LogGroupName: !Ref TrailLogGroup
+          MetricTransformations:
+              - MetricName: "codebuildEvent"
+                MetricNamespace: "CloudTrailMetrics"
+                MetricValue: "1"
+
+    CodeBuildStateChangeAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: !Sub ${AWS::StackName}-CloudTrailCodebuildEventChange
+        AlarmDescription: "Alarm when cloudtrail receives an state change event from codebuild"
+        MetricName: "codebuildEvent"
+        AlarmActions: 
+          - !Ref CloudTrailTopic
+        ComparisonOperator: "GreaterThanThreshold"
+        EvaluationPeriods: 1
+        Threshold: 0
+        Namespace: "CloudTrailMetrics"
+        Statistic: "Sum"
+        Period: 1800
+
+    ### AWS Config rules
+    AWSConfigRule1:
+      Type: 'AWS::Config::ConfigRule'
+      Properties:
+        ConfigRuleName: !Sub ${AWS::StackName}-codebuild-project-envvar-awscred-check
+        Description: >-
+          Checks whether the project contains environment variables
+          AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. The rule is NON_COMPLIANT
+          when the project environment variables contains plaintext credentials.
+        InputParameters: {}
+        Scope:
+          ComplianceResourceTypes:
+            - 'AWS::CodeBuild::Project'
+        Source:
+          Owner: AWS
+          SourceIdentifier: CODEBUILD_PROJECT_ENVVAR_AWSCRED_CHECK
+
+    AWSConfigRule2:
+      Type: 'AWS::Config::ConfigRule'
+      Properties:
+        ConfigRuleName: !Sub ${AWS::StackName}-codebuild-project-source-repo-url-check
+        Description: >-
+          Checks whether the GitHub or Bitbucket source repository URL contains
+          either personal access tokens or user name and password. The rule is
+          complaint with the usage of OAuth to grant authorization for accessing
+          GitHub or Bitbucket repositories.
+        InputParameters: {}
+        Scope:
+          ComplianceResourceTypes:
+            - 'AWS::CodeBuild::Project'
+        Source:
+          Owner: AWS
+          SourceIdentifier: CODEBUILD_PROJECT_SOURCE_REPO_URL_CHECK
+
+    AWSConfigRule3:
+      Type: 'AWS::Config::ConfigRule'
+      Properties:
+        ConfigRuleName: !Sub ${AWS::StackName}-cloud-trail-log-file-validation-enabled
+        Description: >-
+          Checks whether AWS CloudTrail creates a signed digest file with logs.
+          AWS recommends that the file validation must be enabled on all trails.
+          The rule is noncompliant if the validation is not enabled.
+        InputParameters: {}
+        Scope: {}
+        Source:
+          Owner: AWS
+          SourceIdentifier: CLOUD_TRAIL_LOG_FILE_VALIDATION_ENABLED
+
+    #### Codepipeline creation 
+    AppPipeline:
+      Type: 'AWS::CodePipeline::Pipeline'
+      Properties:
+        Name: !Sub ${AWS::StackName}-pipeline
+        RoleArn: !GetAtt 
+          - PipelineServiceRole
+          - Arn
+        Stages:
+          - Name: Source
+            Actions:
+              - Name: SourceAction
+                ActionTypeId:
+                  Category: Source 
+                  Owner: AWS 
+                  Version: '1'
+                  Provider: CodeCommit
+                OutputArtifacts:
+                  - Name: SourceOutput
+                Configuration: 
+                  BranchName: !Ref BranchName
+                  RepositoryName: !Ref RepositoryName
+                  PollForSourceChanges: false
+                RunOrder: 1
+          ### Actual blog Pipeline stages 
+          - Name: Build-Secrets
+            Actions:
+              - Name: Secret-Analysis
+                InputArtifacts:
+                  - Name: SourceOutput
+                ActionTypeId:
+                  Category: Build
+                  Owner: AWS
+                  Version: '1'
+                  Provider: CodeBuild
+                OutputArtifacts: 
+                  - Name: SecArtifacts
+                Configuration:
+                  ProjectName: !Ref SecBuildProject
+                RunOrder: 2
+                   
+          - Name: Build-SAST
+            Actions:
+              - Name: SAST-Analysis
+                InputArtifacts:
+                  - Name: SourceOutput
+                ActionTypeId:
+                  Category: Build
+                  Owner: AWS
+                  Version: '1'
+                  Provider: CodeBuild
+                OutputArtifacts: 
+                  - Name: SASTArtifacts
+                Configuration:
+                  ProjectName: !Ref SASTBuildProject
+                RunOrder: 3
+              - Name: ECR-SAST-and-STG-Deploy
+                InputArtifacts:
+                  - Name: SourceOutput
+                ActionTypeId:
+                  Category: Build
+                  Owner: AWS
+                  Version: '1'
+                  Provider: CodeBuild
+                OutputArtifacts: 
+                  - Name: ECRSASTArtifacts
+                Configuration:
+                  ProjectName: !Ref ECRSASTBuildProject
+                RunOrder: 4
+
+          # ###### demo stages ####
+          # - Name: Build-SecretsScanning-and-SAST
+          #   Actions:
+          #     - Name: SecretAnalysis
+          #       InputArtifacts:
+          #         - Name: SourceOutput
+          #       ActionTypeId:
+          #         Category: Build
+          #         Owner: AWS
+          #         Version: '1'
+          #         Provider: CodeBuild
+          #       OutputArtifacts: 
+          #         - Name: SecArtifacts
+          #       Configuration:
+          #         ProjectName: !Ref SecBuildProject
+          #       RunOrder: 2
+          #     - Name: SASTAnalysis
+          #       InputArtifacts:
+          #         - Name: SourceOutput
+          #       ActionTypeId:
+          #         Category: Build
+          #         Owner: AWS
+          #         Version: '1'
+          #         Provider: CodeBuild
+          #       OutputArtifacts: 
+          #         - Name: SASTArtifacts
+          #       Configuration:
+          #         ProjectName: !Ref SASTBuildProject
+          #       RunOrder: 2
+                   
+          # - Name: Build-SAST-and-Deploy-STG
+          #   Actions:
+          #     - Name: ECRSASTAnalysis
+          #       InputArtifacts:
+          #         - Name: SourceOutput
+          #       ActionTypeId:
+          #         Category: Build
+          #         Owner: AWS
+          #         Version: '1'
+          #         Provider: CodeBuild
+          #       OutputArtifacts: 
+          #         - Name: ECRSASTArtifacts
+          #       Configuration:
+          #         ProjectName: !Ref ECRSASTBuildProject
+          #       RunOrder: 4
+          
+          ### Build stage for DAST analysis with OWASP Zap  
+          - Name: Build-DAST
+            Actions:
+              - Name: DASTAnalysis
+                InputArtifacts:
+                  - Name: SourceOutput
+                ActionTypeId:
+                  Category: Test
+                  Owner: AWS
+                  Version: '1'
+                  Provider: CodeBuild
+                Configuration:
+                  ProjectName: !Ref DASTBuildProject
+                RunOrder: 5
+
+          ### Manual approval change
+          - Name: Manual-Approval
+            Actions:
+              - Name: ApprovalRequired2
+                ActionTypeId:
+                  Category: Approval
+                  Owner: AWS
+                  Version: '1'
+                  Provider: Manual
+                Configuration:
+                  CustomData: There are no critical security vulnerabilities. Your approval is needed to deploy.
+                  ExternalEntityLink: !Sub https://console.amazonaws.com/codesuite/codepipeline/pipelines/${AWS::StackName}/general?region=${AWS::Region}
+                  NotificationArn: !Ref ApprovalTopic
+                RunOrder: 6
+
+          ### Deploy to prod EKS
+          - Name: Deploy-PRD
+            Actions:
+              - Name: EKSDeploy
+                InputArtifacts:
+                  - Name: SourceOutput
+                ActionTypeId:
+                  Category: Build
+                  Owner: AWS
+                  Version: '1'
+                  Provider: CodeBuild
+                Configuration:
+                  ProjectName: !Ref DeployBuildProject
+                RunOrder: 7
+        
+        ArtifactStore:
+          Type: S3
+          Location: !Ref CodePipelineArtifactStoreBucket
+          EncryptionKey: 
+            Id: !GetAtt PipelineKMSKey.Arn
+            Type: KMS
+        Tags:
+          - Key: pipeline-name
+            Value: !Sub ${AWS::StackName}-pipeline       
+
+    #### SAST amalysis codebuild project
+    SASTBuildProject:
+      Type: AWS::CodeBuild::Project
+      Properties:
+        Description: Static Code Analysis Build Project
+        Artifacts:
+          Type: CODEPIPELINE
+        EncryptionKey: !GetAtt PipelineKMSKey.Arn
+        Environment:
+          ComputeType: BUILD_GENERAL1_SMALL
+          Image: aws/codebuild/standard:4.0
+          Type: LINUX_CONTAINER
+          EnvironmentVariables: 
+          - Name: IMAGE_REPO_NAME
+            Value: !Ref EcrRepositoryName
+          - Name: REPOSITORY_URI
+            Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}
+          - Name: EKS_CLUSTER_NAME
+            Value: !Ref EksClusterName
+          - Name: EKS_KUBECTL_ROLE_ARN
+            Value: !GetAtt StaticCodeAnalysisServiceRole.Arn
+          - !If
+            - ScanWith_Snyk
+            - Name: SnykApiKey
+              Type: PARAMETER_STORE
+              Value: !Ref SSMParameterForSnykApiKey
+            - !Ref "AWS::NoValue"
+          PrivilegedMode: true
+        ServiceRole: !Ref 'StaticCodeAnalysisServiceRole'
+        Source:
+          Type: CODEPIPELINE
+          BuildSpec: 
+            Fn::If:
+              - ScanWith_Anchore 
+              - buildspec-anchore.yml 
+              - buildspec-snyk.yml
+        LogsConfig:
+            CloudWatchLogs:
+              GroupName: !Ref CloudWatchLogGroup
+              Status: ENABLED
+              StreamName: SASTAnalysis
+        QueuedTimeoutInMinutes: 10
+        Tags:
+          - Key: pipeline-name
+            Value: !Sub ${AWS::StackName}-pipeline     
+
+    #### ECR SAST amalysis codebuild project
+    ECRSASTBuildProject:
+      Type: AWS::CodeBuild::Project
+      Properties:
+        Description: ECR Static Code Analysis Build Project
+        Artifacts:
+          Type: CODEPIPELINE
+        EncryptionKey: !GetAtt PipelineKMSKey.Arn
+        Environment:
+          ComputeType: BUILD_GENERAL1_SMALL
+          Image: aws/codebuild/standard:4.0
+          Type: LINUX_CONTAINER
+          EnvironmentVariables:
+                - Name: IMAGE_REPO_NAME
+                  Value: !Ref EcrRepositoryName
+                - Name: REPOSITORY_URI
+                  Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}
+                - Name: EKS_CLUSTER_NAME
+                  Value: !Ref EksClusterName
+                - Name: EKS_KUBECTL_ROLE_ARN
+                  Value: !GetAtt StaticCodeAnalysisServiceRole.Arn
+          PrivilegedMode: true
+        ServiceRole: !Ref 'StaticCodeAnalysisServiceRole'
+        Source:
+          Type: CODEPIPELINE
+          BuildSpec: buildspec-ecr.yml
+        LogsConfig:
+            CloudWatchLogs:
+              GroupName: !Ref CloudWatchLogGroup
+              Status: ENABLED
+              StreamName: ECRSASTAnalysis
+        QueuedTimeoutInMinutes: 10
+        Tags:
+          - Key: pipeline-name
+            Value: !Sub ${AWS::StackName}-pipeline  
+    
+    
+    ####Secrets Analysis BuildProject
+    SecBuildProject:
+      Type: AWS::CodeBuild::Project
+      Properties:
+        Description: Secrets Analysis Build Project
+        Artifacts:
+          Type: CODEPIPELINE
+        EncryptionKey: !GetAtt PipelineKMSKey.Arn
+        Environment:
+          ComputeType: BUILD_GENERAL1_SMALL
+          Image: aws/codebuild/standard:4.0
+          Type: LINUX_CONTAINER
+          EnvironmentVariables:
+                - Name: CODECOMMIT_REPO_NAME
+                  Value: !Ref RepositoryName
+                - Name: REPOSITORY_URI
+                  Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}
+          PrivilegedMode: true
+        ServiceRole: !Ref 'StaticCodeAnalysisServiceRole'
+        Source:
+          Type: CODEPIPELINE
+          BuildSpec: buildspec-gitsecrets.yml
+        LogsConfig:
+            CloudWatchLogs:
+              GroupName: !Ref CloudWatchLogGroup
+              Status: ENABLED
+              StreamName: SecretAnalysis
+        QueuedTimeoutInMinutes: 10
+        Tags:
+          - Key: pipeline-name
+            Value: !Sub ${AWS::StackName}-pipeline          
+
+    #### DAST analysis codebuild project
+    DASTBuildProject:
+      Type: AWS::CodeBuild::Project
+      Properties:
+        Description: Dynamic Code Analysis Build Project
+        Artifacts:
+          Type: CODEPIPELINE
+        EncryptionKey: !GetAtt PipelineKMSKey.Arn
+        Environment:
+          ComputeType: BUILD_GENERAL1_SMALL
+          Image: aws/codebuild/standard:4.0
+          Type: LINUX_CONTAINER
+          PrivilegedMode: true
+          EnvironmentVariables:   ## adding environment variable from SSM parameter
+              - Name: OwaspZapApiKey
+                Type: PARAMETER_STORE
+                Value: !Ref SSMParameterForZapApiKey
+              - Name: OwaspZapURL
+                Type: PARAMETER_STORE
+                Value: !Ref SSMParameterOwaspZapURL
+              - Name: ApplicationURL
+                Type: PARAMETER_STORE
+                Value: !Ref SSMParameterAppURL
+        ServiceRole: !Ref 'StaticCodeAnalysisServiceRole'
+        Source:
+          Type: CODEPIPELINE
+          BuildSpec: buildspec-owasp-zap.yml
+        LogsConfig:
+            CloudWatchLogs:
+              GroupName: !Ref CloudWatchLogGroup
+              Status: ENABLED
+              StreamName: DASTAnalysis
+        QueuedTimeoutInMinutes: 10
+        Tags:
+          - Key: pipeline-name
+            Value: !Sub ${AWS::StackName}-pipeline      
+
+    ### EKS Deploy BuildProject
+    DeployBuildProject:
+      Type: AWS::CodeBuild::Project
+      Properties:
+        Description: EKS Prod Deploy Build Project
+        Artifacts:
+          Type: CODEPIPELINE
+        EncryptionKey: !GetAtt PipelineKMSKey.Arn
+        Environment:
+          ComputeType: BUILD_GENERAL1_SMALL
+          Image: aws/codebuild/standard:4.0
+          Type: LINUX_CONTAINER
+          PrivilegedMode: true
+          EnvironmentVariables:
+            - Name: IMAGE_REPO_NAME
+              Value: !Ref EcrRepositoryName
+            - Name: REPOSITORY_URI
+              Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}
+            - Name: EKS_PROD_CLUSTER_NAME
+              Value: !Ref EksProdClusterName
+            - Name: EKS_KUBECTL_ROLE_ARN
+              Value: !GetAtt StaticCodeAnalysisServiceRole.Arn
+        ServiceRole: !Ref 'StaticCodeAnalysisServiceRole'
+        Source:
+          Type: CODEPIPELINE
+          BuildSpec: buildspec-prod.yml
+        LogsConfig:
+            CloudWatchLogs:
+              GroupName: !Ref CloudWatchLogGroup
+              Status: ENABLED
+              StreamName: ProdDeploy
+        QueuedTimeoutInMinutes: 10
+        Tags:
+          - Key: pipeline-name
+            Value: !Sub ${AWS::StackName}-pipeline 
+
+    ###StaticCode Analysis ServiceRole
+    StaticCodeAnalysisServiceRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: sts:AssumeRole
+              Principal:
+                Service:
+                  - codebuild.amazonaws.com
+        Policies:
+          - PolicyName: SecurityCodeAnalysisPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: iam:PassRole
+                  Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - iam:PassRole
+                    - logs:*
+                    - s3:*
+                    - cloudformation:*
+                    - cloudwatch:*
+                    - cloudtrail:*
+                    - codebuild:*
+                    - codecommit:*
+                    - codepipeline:*
+                    - ssm:*
+                    - lambda:*
+                    - kms:*
+                    - ecr:*
+                    - eks:DescribeCluster
+                  Resource: '*'
+        Path: /
+        RoleName: !Join
+          - '-'
+          - - !Ref 'AWS::StackName'
+            - SecurityCodeAnalysisRole
+
+    #### Lambda Function Execution Role
+    LambdaExecutionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: !Sub ${AWS::StackName}-LambdaExecutionRole
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Path: "/"
+        Policies:
+          - PolicyName: lambda-execution-policy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - logs:*
+                    - S3:*
+                    - securityhub:*
+                  Resource: '*'
+    
+    ###Pipeline Service Role
+    PipelineServiceRole:
+      Type: 'AWS::IAM::Role'
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - codepipeline.amazonaws.com
+              Action: 'sts:AssumeRole'
+        Path: /
+        Policies:
+          - PolicyName: !Sub ${AWS::StackName}-CodePipeline-Servicepolicy
+            PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - 'codecommit:CancelUploadArchive'
+                    - 'codecommit:GetBranch'
+                    - 'codecommit:GetCommit'
+                    - 'codecommit:GetUploadArchiveStatus'
+                    - 'codecommit:UploadArchive'
+                  Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - 'codedeploy:CreateDeployment'
+                    - 'codedeploy:GetApplicationRevision'
+                    - 'codedeploy:GetDeployment'
+                    - 'codedeploy:GetDeploymentConfig'
+                    - 'codedeploy:RegisterApplicationRevision'
+                  Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - 'codebuild:BatchGetBuilds'
+                    - 'codebuild:StartBuild'
+                  Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - 'devicefarm:ListProjects'
+                    - 'devicefarm:ListDevicePools'
+                    - 'devicefarm:GetRun'
+                    - 'devicefarm:GetUpload'
+                    - 'devicefarm:CreateUpload'
+                    - 'devicefarm:ScheduleRun'
+                  Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - 'lambda:InvokeFunction'
+                    - 'lambda:ListFunctions'
+                    - 'lambda:CreateFunction'
+                    - 'lambda:UpdateFunctionConfiguration'
+                    - 'lambda:UpdateFunctionCode'
+                    - 'lambda:TagResource'
+                    - 'lambda:PublishVersion'
+                    - 'lambda:GetFunctionConfiguration'
+                    - 'lambda:GetFunction'
+                  Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - 'iam:PassRole'
+                  Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - 'elasticbeanstalk:*'
+                    - 'ec2:*'
+                    - 'elasticloadbalancing:*'
+                    - 'autoscaling:*'
+                    - 'cloudwatch:*'
+                    - 's3:*'
+                    - 'sns:*'
+                    - 'cloudformation:*'
+                    - 'rds:*'
+                    - 'sqs:*'
+                    - 'ecs:*'
+                    - 'logs:*'
+                    - 'kms:*'
+                    - 'ecr:*'
+                  Resource: '*'
+  
+  ###Outputs
+  Outputs:
+    ArtifactBucketName:
+      Description: The s3 bucket name of the artifact repository with GetAtt function
+      Value: !GetAtt CodePipelineArtifactStoreBucket.Arn
+
+    ArtifactBucketNameRef:
+      Description: S3 bucketname with Ref function
+      Value: !Ref CodePipelineArtifactStoreBucket
+
+    LambdaFunctionArn:
+      Description: LambdaFunction Arn value
+      Value: !GetAtt LambdaFunSecurityHubImport.Arn
+
+    CloudWatchLogGroupName:
+      Description: Cloudwatch Log group name
+      Value: !Ref CloudWatchLogGroup
+
+    PipelineKeyArn:
+      Description: KMS Key ARN for the pipeline
+      Value: !GetAtt PipelineKMSKey.Arn
+
+    SASTBuildProjectRoleArn:
+      Description: servicerole for SAST build project
+      Value: !GetAtt StaticCodeAnalysisServiceRole.Arn
+    
+
+    

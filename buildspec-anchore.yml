@@ -1,0 +1,53 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+version: 0.2
+phases:
+  install:
+    commands:
+      - echo "in the install phase"
+      - curl -sS -o kubectl https://amazon-eks.s3.us-west-2.amazonaws.com/1.18.9/2020-11-02/bin/linux/amd64/kubectl
+      - chmod +x ./kubectl
+      - apt-get update && apt-get -y install jq --upgrade awscli
+    finally:
+      - echo This always runs even if the login command fails    
+  pre_build:
+    commands:
+      - echo "inside pre_build stage"
+      - nohup /usr/local/bin/dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2375 --storage-driver=overlay&
+      - timeout 15 sh -c "until docker info; do echo .; sleep 1; done"
+      - echo "stage pre_build completed"
+  build:
+    commands:
+      - echo "inside build stage"
+      - cd $CODEBUILD_SRC_DIR
+      - docker build . -t $IMAGE_REPO_NAME:$CODEBUILD_RESOLVED_SOURCE_VERSION -f dockerfile-wp.dockerfile
+      - curl -s https://ci-tools.anchore.io/inline_scan-v0.6.0 | bash -s -- -r $IMAGE_REPO_NAME:$CODEBUILD_RESOLVED_SOURCE_VERSION
+      - TAG="$CODEBUILD_RESOLVED_SOURCE_VERSION"
+      - docker tag $IMAGE_REPO_NAME:$CODEBUILD_RESOLVED_SOURCE_VERSION $REPOSITORY_URI:latest
+      - $(aws ecr get-login --no-include-email --region $AWS_DEFAULT_REGION)
+  post_build:
+    commands:
+      - |
+        jq "{ \"messageType\": \"CodeScanReport\", \"reportType\": \"ANCHORE\", \
+        \"createdAt\": $(date +\"%Y-%m-%dT%H:%M:%S.%3NZ\"), \"source_repository\": env.CODEBUILD_SOURCE_REPO_URL, \
+        \"source_branch\": env.CODEBUILD_SOURCE_VERSION, \
+        \"build_id\": env.CODEBUILD_BUILD_ID, \
+        \"source_commitid\": env.CODEBUILD_RESOLVED_SOURCE_VERSION, \
+        \"report\": . }" anchore-reports/*-vuln.json > payload.json
+      - echo ""
+      - |
+        if (grep -E 'High|Critical' payload.json); then 
+          aws lambda invoke --function-name ImpToSecurityHubEKS --payload file://payload.json anchore-reports/*-vuln.json && echo "LAMBDA_SUCCEDED" || echo "LAMBDA_FAILED";
+          echo "There are critical or high vulnerabilities.. failing the build"
+          docker push $REPOSITORY_URI:latest
+          exit 1;
+        elif (grep -E 'Medium' payload.json); then
+          aws lambda invoke --function-name ImpToSecurityHubEKS --payload file://payload.json anchore-reports/*-vuln.json && echo "LAMBDA_SUCCEDED" || echo "LAMBDA_FAILED";
+          docker push $REPOSITORY_URI:latest
+        else
+          docker push $REPOSITORY_URI:latest
+        fi
+      - printf '[{"name":"hello-k8s","imageUri":"%s"}]' $REPOSITORY_URI:$TAG > build.json
+artifacts:
+  type: zip
+  files: '**/*'

@@ -1,0 +1,61 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+version: 0.2
+phases:
+  install:
+    commands:
+      - echo "in the install phase"
+      - curl -sS -o kubectl https://amazon-eks.s3.us-west-2.amazonaws.com/1.18.9/2020-11-02/bin/linux/amd64/kubectl
+      - chmod +x ./kubectl
+      - apt-get update && apt-get -y install jq python3-pip python3-dev && pip3 install --upgrade awscli
+    finally:
+      - echo This always runs even if the login command fails 
+      
+  pre_build:
+    commands:
+      - echo "inside pre_build stage"
+      - nohup /usr/local/bin/dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2375 --storage-driver=overlay&
+      - timeout 15 sh -c "until docker info; do echo .; sleep 1; done"
+      - echo "stage pre_build completed"
+  build:
+    commands:
+      - echo "inside build stage"
+      - cd $CODEBUILD_SRC_DIR
+      #- sed -i 's@CONTAINER_IMAGE@'"$REPOSITORY_URI:latest"'@' wordpress-stg.yaml
+      - $(aws ecr get-login --no-include-email --region $AWS_DEFAULT_REGION)
+      ## waiting on ECR scanning status
+      - |
+        stat="IN_PROGRESS";
+        while [ "$stat" != "COMPLETE" ]; do
+          if [ $stat = "FAILED" ] || [ $stat = "CANCELLED" ]; then
+            echo "ECR scan failed";
+            exit 1;
+          fi
+          stat=$(aws ecr describe-image-scan-findings --repository-name eks-container-repo --image-id imageTag=latest | jq -r '.imageScanStatus.status');
+          sleep 5;
+        done
+      - aws ecr describe-image-scan-findings --repository-name eks-container-repo --image-id imageTag=latest > ecr_scan_result.json
+  post_build:
+    commands:
+      - |
+        jq "{ \"messageType\": \"CodeScanReport\", \"reportType\": \"ECR\", \
+        \"createdAt\": $(date +\"%Y-%m-%dT%H:%M:%S.%3NZ\"), \"source_repository\": env.CODEBUILD_SOURCE_REPO_URL, \
+        \"source_branch\": env.CODEBUILD_SOURCE_VERSION, \
+        \"build_id\": env.CODEBUILD_BUILD_ID, \
+        \"source_commitid\": env.CODEBUILD_RESOLVED_SOURCE_VERSION, \
+        \"report\": . }" ecr_scan_result.json > payload.json
+      - echo ""
+      - |
+        if (grep -E 'HIGH|CRITICAL' ecr_scan_result.json); then 
+          aws lambda invoke --function-name ImpToSecurityHubEKS --payload file://payload.json ecr_scan_result.json && echo "LAMBDA_SUCCEDED" || echo "LAMBDA_FAILED";
+          echo "There are critical or high vulnerabilities.. failing the build"
+          exit 1;
+        elif (grep -E 'MEDIUM' ecr_scan_result.json); then
+          aws lambda invoke --function-name ImpToSecurityHubEKS --payload file://payload.json ecr_scan_result.json && echo "LAMBDA_SUCCEDED" || echo "LAMBDA_FAILED";
+        fi
+      - aws eks update-kubeconfig --name $EKS_CLUSTER_NAME
+      - kubectl patch deployment wordpress-deployment -p "{\"spec\":{\"template\":{\"metadata\":{\"labels\":{\"build\":\"dev-123456\"}}}}}}"
+      - printf '[{"name":"hello-k8s","imageUri":"%s"}]' $REPOSITORY_URI:$TAG > build.json
+artifacts:
+  type: zip
+  files: '**/*'

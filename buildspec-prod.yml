@@ -1,0 +1,32 @@
+#  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#  SPDX-License-Identifier: MIT-0
+version: 0.2
+phases:
+  install:
+    commands:
+      - echo "in the install phase"
+      - curl -sS -o kubectl https://amazon-eks.s3.us-west-2.amazonaws.com/1.18.9/2020-11-02/bin/linux/amd64/kubectl
+      - chmod +x ./kubectl
+      - apt-get update && apt-get -y install jq python3-pip python3-dev && pip3 install --upgrade awscli
+    finally:
+      - echo "This always runs even if the login command fails"     
+  pre_build:
+    commands:
+      - echo "inside pre_build stage"
+      - nohup /usr/local/bin/dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2375 --storage-driver=overlay&
+      - timeout 15 sh -c "until docker info; do echo .; sleep 1; done"
+      - echo "prod pre_build completed"
+  build:
+    commands:
+      - cd $CODEBUILD_SRC_DIR
+      - $(aws ecr get-login --no-include-email --region $AWS_DEFAULT_REGION)
+  post_build:
+    commands:
+      - echo "inside post_buil .. deploying build"
+      - bash -c "if [ /"$CODEBUILD_BUILD_SUCCEEDING/" == /"0/" ]; then exit 1; fi"
+      - aws eks update-kubeconfig --name $EKS_PROD_CLUSTER_NAME
+      - kubectl patch deployment wordpress-deployment -p "{\"spec\":{\"template\":{\"metadata\":{\"labels\":{\"build\":\"prod-123456\"}}}}}}"
+      - printf '[{"name":"prod-deployment","imageUri":"%s"}]' $REPOSITORY_URI:$TAG > build.json
+artifacts:
+  type: zip
+  files: '**/*'
