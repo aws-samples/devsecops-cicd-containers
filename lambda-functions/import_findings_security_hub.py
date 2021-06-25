@@ -118,20 +118,8 @@ def process_message(event):
             alert_count = len(alert_ct)
             for alertno in range(alert_count):
                 risk_desc = event['report']['site'][0]['alerts'][alertno]['riskdesc']
-                #riskletters = risk_desc[0:3]
                 severity = risk_desc[0:3]
-                normalized_severity =  assign_normalized_severity(severity)
-                # if riskletters == 'Hig':
-                #     normalized_severity = 70
-                #     vul_level = "NOTLOW"
-                # elif riskletters == 'Med':
-                #     normalized_severity = 60
-                #     vul_level = "NOTLOW"
-                # elif riskletters == 'Low' or riskletters == 'Inf':  
-                #     normalized_severity = 30
-                # else:
-                #     normalized_severity = 90
-                #     vul_level = "NOTLOW"                                        
+                normalized_severity =  assign_normalized_severity(severity)                                        
                 instances = len(event['report']['site'][0]['alerts'][alertno]['instances'])
                 finding_description = f"{alertno}-Vulerability:{event['report']['site'][0]['alerts'][alertno]['alert']}-Total occurances of this issue:{instances}"
                 finding_id = f"{alertno}-{report_type.lower()}-{build_id}"
