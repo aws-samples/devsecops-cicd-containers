@@ -21,7 +21,6 @@ phases:
     commands:
       - echo "inside build stage"
       - cd $CODEBUILD_SRC_DIR
-      #- sed -i 's@CONTAINER_IMAGE@'"$REPOSITORY_URI:latest"'@' wordpress-stg.yaml
       - $(aws ecr get-login --no-include-email --region $AWS_DEFAULT_REGION)
       ## waiting on ECR scanning status
       - |
