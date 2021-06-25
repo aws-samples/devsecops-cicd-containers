@@ -22,7 +22,7 @@ The buildspecs and property files for vulnerability scanning using AWS CodeBuild
 
 AWS lambda is used to parse the scanning analysis results and post it to AWS Security Hub
 * import_findings_security_hub.py: to parse the scanning results, extract the vulnerability details.
-* securityhub.py: to post the vulnerability details to AWS Security Hub in ASFF format (AWS Security Finding Format) .
+* securityhub.py: to post the vulnerability details to AWS Security Hub in ASFF format (AWS Security Finding Format).
 
 ### CloudFormation for Pipeline:
 
