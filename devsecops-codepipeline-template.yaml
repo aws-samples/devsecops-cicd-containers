@@ -318,12 +318,9 @@
               Effect: Deny
               Principal: '*'
               Action: 's3:PutObject'
-              Resource: !Join 
-                - ''
-                - - !GetAtt 
-                    - CodePipelineArtifactStoreBucket
-                    - Arn
-                  - /*
+              Resource: 
+                - !Sub arn:aws:s3:::${CodePipelineArtifactStoreBucket}/*
+                - !Sub arn:aws:s3:::${CodePipelineArtifactStoreBucket}
               Condition:
                 StringNotEquals:
                   's3:x-amz-server-side-encryption': 'aws:kms'
@@ -331,12 +328,9 @@
               Effect: Deny
               Principal: '*'
               Action: 's3:*'
-              Resource: !Join 
-                - ''
-                - - !GetAtt 
-                    - CodePipelineArtifactStoreBucket
-                    - Arn
-                  - /*
+              Resource: 
+                - !Sub arn:aws:s3:::${CodePipelineArtifactStoreBucket}/*
+                - !Sub arn:aws:s3:::${CodePipelineArtifactStoreBucket}
               Condition:
                 Bool:
                   'aws:SecureTransport': false
